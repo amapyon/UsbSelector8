@@ -37,6 +37,10 @@
 
 from machine import Pin, I2C
 import utime
+import sys
+import select
+
+DEBUG_MODE = True # Set to False for production
 
 # ========= MCP23017 Register Map (Bank=0) =========
 IODIRA   = 0x00
@@ -195,7 +199,8 @@ class Usb8Selector:
       - VBUS: 74HC137 (→ CH217K)
       - PCテーブル: PCクラスの配列で一元管理
     """
-    def __init__(self):
+    def __init__(self, debug_mode=False):
+        self.debug_mode = debug_mode
         # ==== ハード初期化 ====
         self.ts3 = TS3USB30(Pin(0, Pin.OUT), Pin(1, Pin.OUT))
         self.muxA = PI3USB14(Pin(2, Pin.OUT), Pin(3, Pin.OUT), Pin(4, Pin.OUT), name="A")
@@ -273,6 +278,8 @@ class Usb8Selector:
         self.ts3.enable()
 
         self.selected = pc.index
+        if self.debug_mode:
+            pc.debug_print()
 
     def _update_leds(self):
         self.io.set_led_only(self.selected)
@@ -284,7 +291,6 @@ class Usb8Selector:
         else:
             if idx != self.selected:
                 self._route_to_pc(self.pcs[idx])
-                self.pcs[idx].debug_print()
         self._update_leds()
 
     def disconnect(self):
@@ -292,7 +298,7 @@ class Usb8Selector:
         self._update_leds()
 
     def debug_print_status(self):
-        print("\n--- Usb8Selector Status ---")
+        print("\n--- Usb8Selector Status ---[{}]".format(utime.ticks_ms()))
         print("Selected PC: {}".format(self.selected))
         # TS3USB30 status
         print("TS3USB30: OE={}, S={}".format(self.ts3.oe.value(), self.ts3.s.value()))
@@ -328,16 +334,59 @@ class Usb8Selector:
 
 # ========= エントリポイント =========
 def main():
-    sel = Usb8Selector()
+    sel = Usb8Selector(DEBUG_MODE)
     print("USB HID 8台切替セレクタ：起動完了（初期は全切断・LED全消灯）。")
+    print("コンソールからコマンド入力可能 (helpで一覧)")
+
+    # 標準入力のポーリング準備
+    poller = select.poll()
+    poller.register(sys.stdin, select.POLLIN)
+
+    def print_help():
+        print("\n--- Console Commands ---")
+        print("  help          : このヘルプを表示")
+        print("  status        : 現在の状態を表示")
+        print("  select <0-7>  : PCを選択")
+        print("  disconnect    : 全てのPCを切断")
+        print("------------------------")
+
     try:
         last_print_time = utime.ticks_ms()
         while True:
+            # コンソールからのコマンド処理 (ノンブロッキング)
+            if poller.poll(0):
+                cmd = sys.stdin.readline().strip()
+                parts = cmd.split()
+                if not parts:
+                    continue
+
+                if parts[0] == "help":
+                    print_help()
+                elif parts[0] == "status":
+                    sel.debug_print_status()
+                elif parts[0] == "disconnect":
+                    sel.disconnect()
+                    print("コンソールコマンド: 全切断しました。")
+                elif parts[0] == "select" and len(parts) > 1:
+                    try:
+                        idx = int(parts[1])
+                        if 0 <= idx <= 7:
+                            sel.select_pc(idx)
+                            print("コンソールコマンド: PC{}を選択しました。".format(idx))
+                        else:
+                            print("エラー: PC番号は0-7で指定してください。")
+                    except ValueError:
+                        print("エラー: PC番号が不正です。")
+                else:
+                    print("エラー: 不明なコマンド '{}'".format(cmd))
+
             # 5秒ごとに状態をデバッグ表示
             if utime.ticks_diff(utime.ticks_ms(), last_print_time) > 5000:
-                sel.debug_print_status()
+                if DEBUG_MODE:
+                    sel.debug_print_status()
                 last_print_time = utime.ticks_ms()
-            utime.sleep_ms(200)
+            utime.sleep_ms(100) # 少し待機
+
     except KeyboardInterrupt:
         sel.disconnect()
         print("終了：全切断。")
